@@ -6,6 +6,8 @@
     <title>Vòng Quay May Mắn</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+	<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+	
     <style>
         body {
             font-family: 'Roboto', sans-serif;
@@ -183,6 +185,13 @@
     </div>
 
     <script>
+        // --- CẤU HÌNH SUPABASE ---
+        const SUPABASE_URL = 'https://gpmuckoydhrokpioltem.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwbXVja295ZGhyb2twaW9sdGVtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU3MTMzNTcsImV4cCI6MjA4MTI4OTM1N30.Fqe5U2hm_fERI6ZLc_FQ1SMh5F4sYOrxr8JqLlwLKI0';
+        
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // --- DOM ELEMENTS ---
         const canvas = document.getElementById('wheelCanvas');
         const ctx = canvas.getContext('2d');
         const spinBtn = document.getElementById('spinBtn');
@@ -199,22 +208,121 @@
         const disableAfterWinToggle = document.getElementById('disableAfterWinToggle');
         const equalSizeToggle = document.getElementById('equalSizeToggle');
 
+        // --- STATE ---
         let disableAfterWin = false; 
-        let isEqualSize = false; // Trạng thái mặc định: Tắt (vẽ theo tỉ lệ thực)
-
-        let prizes = [
-            { text: "10.000đ", color: "#FF5733", textColor: "#FFFFFF", weight: 1, disabled: false },
-            { text: "Mất lượt", color: "#C70039", textColor: "#FFFFFF", weight: 1, disabled: false },
-            { text: "50.000đ", color: "#900C3F", textColor: "#FFFFFF", weight: 1, disabled: false },
-            { text: "Thêm lượt", color: "#581845", textColor: "#FFFFFF", weight: 1, disabled: false },
-            { text: "100.000đ", color: "#FFC300", textColor: "#333333", weight: 1, disabled: false },
-            { text: "Chúc may mắn", color: "#DAF7A6", textColor: "#333333", weight: 10, disabled: false }, // Ví dụ: tỉ lệ cao
-            { text: "20.000đ", color: "#33FF57", textColor: "#333333", weight: 1, disabled: false },
-            { text: "Nhân đôi", color: "#3380FF", textColor: "#FFFFFF", weight: 1, disabled: false }
-        ];
-
+        let isEqualSize = false;
+        let prizes = []; 
         let currentRotation = 0;
         let isSpinning = false;
+
+        // --- SUPABASE FUNCTIONS ---
+
+        // 1. Tải danh sách giải thưởng & Cài đặt
+        async function loadData() {
+            // Gọi song song cả 2 bảng để tiết kiệm thời gian
+            const [prizesRes, settingsRes] = await Promise.all([
+                supabaseClient.from('wheel_prizes').select('*').order('id', { ascending: true }),
+                supabaseClient.from('wheel_settings').select('*').eq('id', 1).single()
+            ]);
+
+            // Xử lý dữ liệu giải thưởng
+            if (prizesRes.error) {
+                console.error('Lỗi tải giải thưởng:', prizesRes.error);
+                prizes = [{ text: "Lỗi kết nối", color: "#ccc", textColor: "#000", weight: 1 }];
+            } else {
+                prizes = prizesRes.data.map(item => ({
+                    id: item.id, 
+                    text: item.text,
+                    color: item.color,
+                    textColor: item.text_color,
+                    weight: item.weight,
+                    disabled: item.disabled
+                }));
+                if (prizes.length === 0) prizes = [{ text: "Chưa có dữ liệu", color: "#ccc", textColor: "#000", weight: 1 }];
+            }
+
+            // Xử lý dữ liệu cài đặt
+            if (settingsRes.error) {
+                console.error('Lỗi tải cài đặt:', settingsRes.error);
+            } else if (settingsRes.data) {
+                disableAfterWin = settingsRes.data.disable_after_win;
+                isEqualSize = settingsRes.data.equal_size;
+                
+                // Cập nhật UI nút gạt ngay lập tức
+                disableAfterWinToggle.checked = disableAfterWin;
+                equalSizeToggle.checked = isEqualSize;
+            }
+
+            drawWheel();
+        }
+
+        // 2. Lưu lịch sử quay
+        async function saveHistory(prizeName) {
+            await supabaseClient.from('wheel_history').insert([{ prize_text: prizeName }]);
+        }
+
+        // 3. Cập nhật giải thưởng VÀ Cài đặt (Admin settings)
+        async function saveAllSettings(newPrizesList) {
+            saveSettingsBtn.textContent = "Đang lưu...";
+            saveSettingsBtn.disabled = true;
+
+            // A. Lưu trạng thái cài đặt vào bảng wheel_settings (ID=1)
+            const { error: settingsError } = await supabaseClient
+                .from('wheel_settings')
+                .upsert({ 
+                    id: 1, 
+                    disable_after_win: disableAfterWinToggle.checked,
+                    equal_size: equalSizeToggle.checked
+                });
+
+            if (settingsError) {
+                alert("Lỗi lưu cài đặt chung: " + settingsError.message);
+                resetSaveBtn();
+                return;
+            }
+
+            // B. Lưu danh sách giải thưởng (Xóa cũ -> Thêm mới)
+            const { error: deleteError } = await supabaseClient
+                .from('wheel_prizes')
+                .delete()
+                .neq('id', 0); 
+
+            if (deleteError) {
+                alert("Lỗi xóa dữ liệu cũ: " + deleteError.message);
+                resetSaveBtn();
+                return;
+            }
+
+            const rowsToInsert = newPrizesList.map(p => ({
+                text: p.text,
+                color: p.color,
+                text_color: p.textColor,
+                weight: parseInt(p.weight) || 1,
+                disabled: p.disabled || false
+            }));
+
+            const { error: insertError } = await supabaseClient
+                .from('wheel_prizes')
+                .insert(rowsToInsert);
+
+            if (insertError) {
+                alert("Lỗi lưu giải thưởng: " + insertError.message);
+            } else {
+                alert("Đã lưu tất cả thành công!");
+                loadData(); // Tải lại toàn bộ
+                settingsModal.classList.remove('visible');
+                settingsModal.classList.add('hidden');
+            }
+            
+            resetSaveBtn();
+        }
+
+        function resetSaveBtn() {
+            saveSettingsBtn.textContent = "Lưu";
+            saveSettingsBtn.disabled = false;
+        }
+
+        // --- LOGIC GAME ---
 
         function drawWheel() {
             const centerX = canvas.width / 2;
@@ -224,17 +332,13 @@
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
             const totalWeight = prizes.reduce((sum, p) => sum + (parseInt(p.weight) || 0), 0);
-            
             let currentAngle = 0;
 
             prizes.forEach((prize) => {
                 let arcSize;
-                
                 if (isEqualSize) {
-                    // Chế độ chia đều: Mỗi ô một góc bằng nhau bất kể trọng số
                     arcSize = (2 * Math.PI) / prizes.length;
                 } else {
-                    // Chế độ mặc định: Góc dựa trên trọng số
                     let weight = parseInt(prize.weight) || 0;
                     if (totalWeight === 0) weight = 1;
                     const safeTotal = totalWeight === 0 ? prizes.length : totalWeight;
@@ -262,24 +366,21 @@
             });
         }
 
-        // Logic quay: Phức tạp hơn để xử lý trường hợp "Equal Size" nhưng "Weighted Probability"
         function spin() {
             if (isSpinning) return;
 
             const activePrizes = prizes.filter(p => !p.disabled);
             if (activePrizes.length === 0) {
-                alert("Đã hết phần thưởng có thể quay! Vui lòng vào cài đặt để lưu lại và reset.");
+                alert("Đã hết phần thưởng có thể quay!");
                 return;
             }
 
             isSpinning = true;
             spinBtn.disabled = true;
 
-            let finalTargetAngle = 0; // Góc mục tiêu trên mặt đĩa (0-360)
+            let finalTargetAngle = 0;
             
             if (isEqualSize) {
-                // CHẾ ĐỘ ẨN TỈ LỆ (Equal Size, Weighted Prob)
-                // 1. Chọn người thắng dựa trên trọng số (RNG Weight)
                 const totalActiveWeight = activePrizes.reduce((sum, p) => sum + (parseInt(p.weight) || 0), 0);
                 let randomWeight = Math.random() * totalActiveWeight;
                 let winner = null;
@@ -292,28 +393,20 @@
                     }
                     randomWeight -= w;
                 }
-                if (!winner) winner = activePrizes[activePrizes.length - 1]; // Fallback
+                if (!winner) winner = activePrizes[activePrizes.length - 1];
 
-                // 2. Tìm vị trí (index) của người thắng trong mảng gốc để xác định góc vẽ
                 const winnerIndex = prizes.indexOf(winner);
-                
-                // 3. Tính góc bắt đầu và kết thúc của ô thắng (trên mặt đĩa hình học)
                 const segmentAngle = 360 / prizes.length;
                 const startAngle = winnerIndex * segmentAngle;
-                // Thêm chút padding để không chỉ vào vạch kẻ
                 const randomOffset = Math.random() * (segmentAngle - 2) + 1; 
-                
                 finalTargetAngle = startAngle + randomOffset;
 
             } else {
-                // CHẾ ĐỘ THƯỜNG (Size = Prob)
-                // Đơn giản là quay random, trúng ô nào tính ô đó (vì size ô đã to nhỏ theo tỉ lệ rồi)
-                // Tuy nhiên vẫn phải loop để tránh ô disabled
                 let isValid = false;
                 let attempts = 0;
                 while (!isValid && attempts < 1000) {
                     const testAngle = Math.random() * 360;
-                    const testResultIndex = calculateResultIndexByGeometry(testAngle, false); // false = weighted geometry
+                    const testResultIndex = calculateResultIndexByGeometry(testAngle, false);
                     if (!prizes[testResultIndex].disabled) {
                         finalTargetAngle = testAngle;
                         isValid = true;
@@ -322,50 +415,26 @@
                 }
             }
 
-            // Tính toán số vòng quay cần thiết để đưa finalTargetAngle về vị trí kim chỉ (270 độ)
-            // Công thức: (270 + rotation) % 360 = targetAngle
-            // => rotation = targetAngle - 270
-            // Thêm các vòng quay (360 * 5) và bù trừ để luôn quay tới
-            
-            // Tính góc cần quay thêm từ vị trí hiện tại
-            const currentMod = currentRotation % 360;
-            // Muốn pointer (270) chỉ vào target, thì góc quay phải đưa target về 270.
-            // Pointer đứng yên, đĩa quay.
-            // Góc đĩa hiện tại: R. Mũi tên chỉ vào: (270 + R).
-            // Muốn mũi tên chỉ vào T. => (270 + R_new) = T => R_new = T - 270.
-            
             let targetRotation = finalTargetAngle - 270;
-            // Đảm bảo targetRotation luôn lớn hơn currentRotation hiện tại + tối thiểu 5 vòng
             while (targetRotation < currentRotation + (360 * 5)) {
                 targetRotation += 360;
             }
 
             currentRotation = targetRotation;
-            canvas.style.transform = `rotate(-${currentRotation}deg)`; // CSS quay ngược chiều kim đồng hồ
+            canvas.style.transform = `rotate(-${currentRotation}deg)`;
 
             setTimeout(() => {
-                showResult(); // Không cần truyền rotation vì đã tính toán winner từ trước hoặc dựa vào góc cuối
+                showResult();
                 isSpinning = false;
                 spinBtn.disabled = false;
                 fireConfetti();
             }, 5000);
         }
 
-        // Hàm tính ra ô kết quả dựa trên hình học hiện tại của vòng quay
-        // Được sử dụng cho:
-        // 1. Chế độ thường: Xác định ô trúng từ góc random
-        // 2. Show Result: Xác định lại ô trúng để hiển thị text (Double check)
         function calculateResultIndexByGeometry(angle0to360, isEqSize) {
-            // Pointer luôn ở (270 + góc quay) % 360
-            // Tuy nhiên hàm này nhận input là "Vị trí trên mặt đĩa" (Target Angle)
-            // Nếu gọi từ showResult, ta cần tính lại Pointer Angle
-            
             let pointerAngle = angle0to360; 
-            // Nếu gọi từ spin loop chế độ thường, angle0to360 chính là vị trí trên đĩa.
-            
             let currentAngleDeg = 0;
             let winnerIndex = 0;
-
             const totalWeight = prizes.reduce((sum, p) => sum + (parseInt(p.weight) || 0), 0);
 
             for (let i = 0; i < prizes.length; i++) {
@@ -389,7 +458,6 @@
         }
 
         function showResult() {
-            // Tính lại góc pointer thực tế
             const actualRotation = currentRotation % 360;
             const pointerAngle = (270 + actualRotation) % 360;
             
@@ -400,6 +468,8 @@
                 resultText.innerText = winner.text;
                 resultText.style.color = winner.color === '#FFFFFF' ? '#000' : winner.color;
                 
+                saveHistory(winner.text);
+
                 if (disableAfterWin) {
                     prizes[winnerIndex].disabled = true;
                     drawWheel();
@@ -412,13 +482,13 @@
 
         function renderSettingsPrizes(prizesData) {
             prizesListContainer.innerHTML = '';
+            // Update UI from Current State
             disableAfterWinToggle.checked = disableAfterWin;
             equalSizeToggle.checked = isEqualSize;
 
             prizesData.forEach((prize, index) => {
                 const row = document.createElement('div');
                 row.className = 'grid grid-cols-12 gap-1 md:gap-2 items-center bg-gray-50 p-2 rounded border border-gray-200';
-                
                 row.innerHTML = `
                     <div class="hidden md:block md:col-span-1 text-center font-bold text-gray-400">${index + 1}</div>
                     <div class="col-span-4 md:col-span-5">
@@ -434,9 +504,7 @@
                         <input type="color" value="${prize.textColor}" class="prize-text-color w-8 h-8 cursor-pointer border-none bg-transparent rounded p-0" title="Màu chữ">
                     </div>
                     <div class="col-span-2 md:col-span-2 text-center">
-                        <button class="delete-prize-btn text-red-500 hover:text-red-700 hover:bg-red-100 p-1.5 rounded-full transition" data-index="${index}" title="Xóa">
-                            🗑️
-                        </button>
+                        <button class="delete-prize-btn text-red-500 hover:text-red-700 hover:bg-red-100 p-1.5 rounded-full transition" data-index="${index}" title="Xóa">🗑️</button>
                     </div>
                 `;
                 prizesListContainer.appendChild(row);
@@ -444,14 +512,10 @@
 
             document.querySelectorAll('.delete-prize-btn').forEach(btn => {
                 btn.addEventListener('click', (e) => {
-                    const index = parseInt(e.currentTarget.getAttribute('data-index'));
-                    const currentData = getPrizesFromDOM();
-                    if (currentData.length <= 2) {
-                        alert("Cần tối thiểu 2 ô để quay!");
-                        return;
-                    }
-                    currentData.splice(index, 1);
-                    renderSettingsPrizes(currentData);
+                    const idx = parseInt(e.currentTarget.getAttribute('data-index'));
+                    const currentData = getPrizesFromDOM(); 
+                    currentData.splice(idx, 1); 
+                    renderSettingsPrizes(currentData); 
                 });
             });
         }
@@ -469,6 +533,8 @@
             return newPrizes;
         }
 
+        // --- EVENT LISTENERS ---
+
         settingsBtn.addEventListener('click', () => {
             renderSettingsPrizes(prizes);
             settingsModal.classList.remove('hidden');
@@ -485,9 +551,7 @@
             const randomColor = '#' + Math.floor(Math.random()*16777215).toString(16);
             currentData.push({ text: "Mới", color: randomColor, textColor: "#ffffff", weight: 1, disabled: false });
             renderSettingsPrizes(currentData);
-            setTimeout(() => {
-                prizesListContainer.scrollTop = prizesListContainer.scrollHeight;
-            }, 50);
+            setTimeout(() => { prizesListContainer.scrollTop = prizesListContainer.scrollHeight; }, 50);
         });
 
         saveSettingsBtn.addEventListener('click', () => {
@@ -496,23 +560,19 @@
                 alert("Vui lòng nhập ít nhất 2 ô phần thưởng!");
                 return;
             }
+            // Gọi hàm lưu cả 2 thứ
+            saveAllSettings(newPrizes);
 
-            prizes = newPrizes;
+            // Cập nhật biến local để chạy luôn không cần load lại
             disableAfterWin = disableAfterWinToggle.checked;
             isEqualSize = equalSizeToggle.checked;
             
             currentRotation = 0; 
             canvas.style.transform = `rotate(0deg)`;
             canvas.style.transition = 'none';
-            
-            drawWheel();
-            
             setTimeout(() => {
                 canvas.style.transition = 'transform 5000ms cubic-bezier(0.25,0.1,0.25,1)';
             }, 50);
-
-            settingsModal.classList.remove('visible');
-            settingsModal.classList.add('hidden');
         });
 
         spinBtn.addEventListener('click', spin);
@@ -521,11 +581,8 @@
             resultModal.classList.add('hidden');
         });
 
-        drawWheel();
-
         function fireConfetti() {
             const colors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff'];
-            const container = document.body;
             for (let i = 0; i < 100; i++) {
                 const confetto = document.createElement('div');
                 confetto.style.width = '10px';
@@ -539,12 +596,15 @@
                 
                 const duration = Math.random() * 3 + 2;
                 confetto.style.transition = `top ${duration}s linear, opacity ${duration}s ease-in`;
-                container.appendChild(confetto);
+                document.body.appendChild(confetto);
                 
                 setTimeout(() => { confetto.style.top = '110vh'; confetto.style.opacity = '0'; }, 100);
                 setTimeout(() => { confetto.remove(); }, duration * 1000);
             }
         }
+
+        // --- KHỞI CHẠY ---
+        loadData(); // Hàm này giờ load cả Prizes và Settings
     </script>
 </body>
 </html>
